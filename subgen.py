@@ -13,23 +13,23 @@ import queue
 import logging
 import gc
 import random
-from typing import Union, Any, Optional
+from typing import Union
 from fastapi import FastAPI, File, UploadFile, Query, Header, Body, Form, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response
+from fastapi.responses import JSONResponse
 import numpy as np
 import stable_whisper
 from stable_whisper import Segment
+from stable_whisper import WordTiming
 import requests
 import av
 import ffmpeg
-import whisper
 import ast
 from watchdog.observers.polling import PollingObserver as Observer
 from watchdog.events import FileSystemEventHandler
 import faster_whisper
 from io import BytesIO
 import io
-import asyncio
 import torch
 from typing import List
 from enum import Enum
@@ -50,7 +50,8 @@ procaddedmedia = convert_to_bool(os.getenv('PROCADDEDMEDIA', True))
 procmediaonplay = convert_to_bool(os.getenv('PROCMEDIAONPLAY', True))
 namesublang = os.getenv('NAMESUBLANG', '')
 webhookport = int(os.getenv('WEBHOOKPORT', 9000))
-word_level_highlight = convert_to_bool(os.getenv('WORD_LEVEL_HIGHLIGHT', False))
+word_level_highlight = convert_to_bool(os.getenv('WORD_LEVEL_HIGHLIGHT', True))
+segment_level = convert_to_bool(os.getenv('SEGMENT_LEVEL', False))
 debug = convert_to_bool(os.getenv('DEBUG', True))
 use_path_mapping = convert_to_bool(os.getenv('USE_PATH_MAPPING', False))
 path_mapping_from = os.getenv('PATH_MAPPING_FROM', r'/tv')
@@ -273,14 +274,19 @@ def appendLine(result):
         lastSegment = result.segments[-1]
         date_time_str = datetime.now().strftime("%d %b %Y - %H:%M:%S")
         appended_text = f"Transcribed by whisperAI with faster-whisper ({whisper_model}) on {date_time_str}"
+        start = lastSegment.start + TIME_OFFSET
+        end = lastSegment.end + TIME_OFFSET
         
         # Create a new segment with the updated information
         newSegment = Segment(
-            start=lastSegment.start + TIME_OFFSET,
-            end=lastSegment.end + TIME_OFFSET,
-            text=appended_text,
-            words=[],  # Empty list for words
-            id=lastSegment.id + 1
+            words=[
+              WordTiming(
+                  word=appended_text,
+                  start=start,
+                  end=end,
+                )
+            ],
+            id=lastSegment.id + 1,
         )
         
         # Append the new segment to the result's segments
@@ -504,13 +510,25 @@ async def asr(
         delete_model()
     
     if result:
-        return StreamingResponse(
-            iter(result.to_srt_vtt(filepath=None, word_level=word_level_highlight)),
-            media_type="text/plain",
-            headers={
-                'Source': 'Transcribed using stable-ts from Subgen!',
-            }
-        )
+        if output == 'srt':
+          return Response(
+              content=result.to_srt_vtt(filepath=None, word_level=word_level_highlight, segment_level=segment_level),
+              media_type="text/plain",
+              headers={
+                  'Source': 'Transcribed using stable-ts from Subgen!',
+              }
+          )
+        elif output == 'json':
+            if not isinstance(result, dict) and callable(getattr(result, 'to_dict')):
+                result = result.to_dict()
+            return JSONResponse(
+                content=result,
+                media_type="application/json",
+                headers={
+                    'Source': 'Transcribed using stable-ts from Subgen!',
+                }
+            )
+
     else:
         return
 @app.post("//detect-language")
@@ -773,7 +791,7 @@ def gen_subtitles(file_path: str, transcription_type: str, force_language : Lang
         else:
             if not force_language:
                 force_language = LanguageCode.from_string(result.language)
-            result.to_srt_vtt(name_subtitle(file_path, force_language), word_level=word_level_highlight)
+            result.to_srt_vtt(name_subtitle(file_path, force_language), word_level=word_level_highlight, segment_level=segment_level)
 
         elapsed_time = time.time() - start_time
         minutes, seconds = divmod(int(elapsed_time), 60)
